@@ -2,4 +2,6 @@ node_modules/
 dist/
 staged/
 release-notes.md
+release-details.json
+metadata/
 .DS_Store
