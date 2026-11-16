@@ -138,6 +138,7 @@ jobs:
           repository: MasterAlanLab/Kero
           ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.KERO_SOURCE_TOKEN }}
+          fetch-depth: 0
           lfs: true
           persist-credentials: false
           path: source
