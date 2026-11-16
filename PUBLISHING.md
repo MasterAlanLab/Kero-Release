@@ -51,7 +51,7 @@
 
 - 将 `source_ref` 解析为一次确定的源码提交，所有平台都构建该 SHA。
 - 使用源码仓库固定的 pnpm 版本与锁文件，设置 `KERO_PLATFORM_POOL=1` 固化 Kero 构建身份，调用既有 `pnpm release:package -- --region global --version <版本> --no-sign`。
-- 在 Windows x64、macOS arm64（连打 arm64 / x64）、Linux x64 原生 runner 上打包。Windows / macOS 保留打包脚本的 smoke 检查；Linux 无头 runner 跳过 smoke。
+- 在 Windows x64、macOS Intel（连打 arm64 / x64）、Linux x64 原生 runner 上打包。Windows 和 Mac x64 执行打包脚本的 smoke 检查；Mac arm64 在 Intel runner 上校验架构与签名，不启动跨架构应用；Linux 无头 runner 跳过 smoke。
 - Linux runner 同时安装 Wayland scanner 及 `wayland-client`、`xkbcommon`、`json-c`、`libturbojpeg`、`libpng` 开发包，用于构建现有桌面输入与截图助手；不跳过原生助手编译。
 - 读取每个平台的 `build-info.json`，核对版本、源码提交、平台、架构、文件名、大小和 SHA-256，仅收集 `installer` 产物。发布时将文件名前缀 `cindy-` 改为 `kero-`，不改安装包内部内容及上游协议身份。
 - 所有平台完成并再次校验后，上传四个安装包、`SHA256SUMS` 和 `release-metadata.json`。元数据只记录版本、源码 SHA、构建链接与附件校验信息。
