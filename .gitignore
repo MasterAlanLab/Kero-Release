@@ -1,0 +1,5 @@
+node_modules/
+dist/
+staged/
+release-notes.md
+.DS_Store
