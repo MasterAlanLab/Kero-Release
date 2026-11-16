@@ -158,7 +158,11 @@ jobs:
 
       - name: Install Linux packaging tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install --yes fakeroot dpkg desktop-file-utils
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          fakeroot dpkg desktop-file-utils build-essential pkg-config
+          libwayland-bin libwayland-dev libxkbcommon-dev libjson-c-dev
+          libturbojpeg0-dev libpng-dev
 
       - name: Install dependencies
         working-directory: source
