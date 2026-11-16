@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { releaseVersion, prepareReleaseDetails } from './release-details.mjs';
 
 const repository = 'MasterAlanLab/Kero-releases';
 const platforms = {
@@ -121,7 +122,7 @@ export async function lookupRelease(version, { token, request = fetch }) {
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      query: 'query($tag: String!) { repository(owner: "MasterAlanLab", name: "Kero-releases") { release(tagName: $tag) { isDraft } } }',
+      query: 'query($tag: String!) { repository(owner: "MasterAlanLab", name: "Kero-releases") { release(tagName: $tag) { isDraft name } } }',
       variables: { tag: `v${version}` },
     }),
     signal: AbortSignal.timeout(30000),
@@ -145,37 +146,50 @@ function gh(args) {
 }
 
 async function main() {
-  const [command, first, second] = process.argv.slice(2);
-  const version = validateVersion(process.env.KERO_VERSION);
+  const [command, first, second, detailsFile] = process.argv.slice(2);
+  const version = releaseVersion(process.env.KERO_VERSION);
   if (command === 'preflight') {
     check(process.env.KERO_SOURCE_TOKEN, 'Configure KERO_SOURCE_TOKEN in repository Actions secrets');
     check(process.env.KERO_SOURCE_REF?.trim() && !/[\r\n\0]/.test(process.env.KERO_SOURCE_REF), 'Invalid source ref');
-    check(process.env.KERO_NOTES?.trim() && process.env.KERO_NOTES.length <= 16000, 'Provide release notes (1–16000 characters)');
+    check((process.env.KERO_NOTES || '').length <= 16000, 'Release notes exceed 16000 characters');
     await existingRelease(version);
     return;
   }
   const sha = process.env.KERO_SOURCE_SHA;
+  if (command === 'details') {
+    check(first && second, 'details requires source directory and output file');
+    const existing = await existingRelease(version);
+    const details = await prepareReleaseDetails(first, {
+      version, sha, token: process.env.GH_TOKEN, notes: process.env.KERO_NOTES || '', previousTitle: existing?.name,
+    });
+    writeFileSync(second, JSON.stringify(details, null, 2) + '\n');
+    return;
+  }
   if (command === 'stage') {
     check(first && second, 'stage requires artifact root and output directory');
     stageInstallers(first, second, { version, sha, platform: process.env.KERO_PLATFORM });
     return;
   }
-  check(command === 'publish' && first && second, 'Expected preflight, stage or publish');
+  check(command === 'publish' && first && second && detailsFile, 'Expected preflight, details, stage or publish');
   check(['true', 'false'].includes(process.env.KERO_DRAFT)
     && ['true', 'false'].includes(process.env.KERO_PRERELEASE), 'Invalid release flags');
   const existing = await existingRelease(version);
+  const details = json(detailsFile);
+  check(details.version === version && details.sha === sha, 'Release details do not match build source');
+  check(typeof details.title === 'string' && details.title.startsWith(`v${version} -- "`)
+    && details.title.length <= 160 && !/[\p{Cc}\p{Cf}]/u.test(details.title), 'Invalid daily release title');
   const buildURL = `https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-  assembleRelease(first, second, { version, sha, notes: process.env.KERO_NOTES, buildURL });
+  assembleRelease(first, second, { version, sha, notes: details.notes, buildURL });
   const notesFile = path.resolve('release-notes.md');
-  writeFileSync(notesFile, `${process.env.KERO_NOTES.trim()}\n\n---\n\n` +
+  writeFileSync(notesFile, `${details.notes.trim()}\n\n---\n\n` +
     `安装说明：[下载与安装](https://github.com/${repository}#readme)。macOS 包未经 Apple 公证，Windows 包未签名。\n\n` +
     `源码提交：\`${sha}\` · [构建记录](${buildURL})\n`);
   const tag = `v${version}`;
   if (!existing) {
-    gh(['release', 'create', tag, '--draft', '--title', `Kero ${version}`, '--notes-file', notesFile,
+    gh(['release', 'create', tag, '--draft', '--title', details.title, '--notes-file', notesFile,
       '--target', process.env.GITHUB_SHA, `--prerelease=${process.env.KERO_PRERELEASE}`]);
   } else {
-    gh(['release', 'edit', tag, '--title', `Kero ${version}`, '--notes-file', notesFile,
+    gh(['release', 'edit', tag, '--title', details.title, '--notes-file', notesFile,
       `--prerelease=${process.env.KERO_PRERELEASE}`]);
   }
   // Recheck before overwriting assets if someone manually published the draft.

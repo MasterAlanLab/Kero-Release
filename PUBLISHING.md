@@ -14,15 +14,38 @@
 
 本机 Git 使用 `git@alan:MasterAlanLab/Kero-releases.git`，复用本机 `alan` SSH 别名。不要将本机 SSH 私钥配置到 Actions。
 
-## 发布一个版本
+## 推送标签自动发布
 
-1. 将需要发布的源码提交并推送到 `MasterAlanLab/Kero`。建议先在源码仓库为已验收提交建立版本标签。
-2. 打开 [Actions → Release Kero](https://github.com/MasterAlanLab/Kero-releases/actions/workflows/release.yml)，选择 **Run workflow**。
-3. 填写 `version`（如 `1.0.0`，不带 `v`）、`source_ref`（源码标签、分支或完整提交 SHA，默认 `main`）、`release_notes`（面向用户的更新说明）。
-4. 默认 `draft = true`，构建成功后保存 Release 草稿。下载对应平台的附件完成安装与启动验收后，在 Releases 页面补充说明并发布。需要直接公开发布时，明确取消 `draft`。
-5. `prerelease = true` 用于预发布测试，官网不会将它作为正式版展示。安装包版本仍使用严格的 `x.y.z`；`0.0.0` 是上游占位版本，不能发布。
+1. 将需要发布的源码提交并推送到 `MasterAlanLab/Kero` 的 `main`。
+2. 在**本发布仓库 `Kero-releases`** 更新 `main`，创建并推送版本标签：
 
-普通提交或推送不会自动消耗构建额度。工作流仅支持手动触发，同一时间只运行一次发布。
+   ```sh
+   git switch main
+   git pull --ff-only origin main
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+
+3. 工作流读取私有源码的 `main`，固定为一个 SHA，再构建所有平台。全部构建和附件校验成功后直接公开 Release，无需手写说明或手动发布草稿。
+
+版本标签必须使用严格的 `vx.y.z`；`v0.0.0`、测试后缀和前导零不可用。标签属于发布仓库，不需要在源码仓库创建同名标签。普通分支推送不触发构建；同一时间只运行一次发布。
+
+### 标题与更新说明
+
+- 标题沿用 emailbox 的格式：`v1.0.0 -- "每日一句"`。从 `https://v1.hitokoto.cn/` 获取句子，清除控制字符并限制长度；超时、空内容或异常响应时使用 `Stay hungry, stay foolish.`，不阻断发布。重试已有草稿时保留原句。
+- 更新说明自动列出上次公开正式版到本次源码 SHA 之间的非合并提交标题及短 SHA；首次发布列出当前源码历史。最多展开 100 条，每条最多 140 字符；其余显示数量。
+- 基准来自上次正式版附件 `release-metadata.json` 的源码 SHA，不使用发布仓库的提交历史。源码提交标题会出现在公开更新说明中，提交时不要包含敏感信息。
+- 历史被重写、基准不是本次源码的祖先或旧版本缺少有效元数据时，停止自动生成；手动填写一次更新说明即可建立新基准。GitHub API 异常仍会报错，避免静默遗漏变更。
+
+### 手动发布与重试
+
+需要固定已验收的源码标签 / SHA、预发布或草稿时，打开 [Actions → Release Kero](https://github.com/MasterAlanLab/Kero-releases/actions/workflows/release.yml)，选择 **Run workflow**：
+
+- `version`：例如 `1.0.0`，也接受 `v1.0.0`。
+- `source_ref`：源码标签、分支或完整 SHA，默认 `main`。
+- `release_notes`：可留空，自动生成；填写后覆盖自动说明。
+- `draft`：默认不勾选，构建成功直接公开；勾选则只保存草稿，供安装验收后手动发布。
+- `prerelease`：默认不勾选；勾选则标记预发布，官网不会将它作为正式版展示。安装包版本仍使用 `x.y.z`。
 
 ## 构建与交付
 
