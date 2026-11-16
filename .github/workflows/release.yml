@@ -115,7 +115,7 @@ jobs:
             os: windows-2025
             package_args: ''
           - platform: macos
-            os: macos-15
+            os: macos-15-intel
             package_args: ''
           - platform: linux
             os: ubuntu-22.04
