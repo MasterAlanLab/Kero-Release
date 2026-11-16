@@ -11,6 +11,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import os from 'node:os';
 import path from 'node:path';
 import { assembleRelease, stageInstallers, validateVersion, lookupRelease } from './release.mjs';
+import { dailyTitle, prepareReleaseDetails, releaseVersion } from './release-details.mjs';
 
 const sha = 'a'.repeat(40);
 const version = '1.2.3';
@@ -139,4 +140,101 @@ test('rejects manifest installer path traversal and mixed commits between platfo
   const info = JSON.parse(readFileSync(stagedInfo));
   writeFileSync(stagedInfo, JSON.stringify({ ...info, sha: 'b'.repeat(40) }));
   assert.throws(() => assembleRelease(f.staged, f.out, options), /Staged build identity mismatch/);
+});
+
+// Production entry: prepareReleaseDetails, used by the workflow before builds.
+// User request: automatic source changelog and emailbox-style daily titles.
+// Existing artifact tests do not exercise release text. Minimal failures:
+// a tag's v prefix, a quote outage, a wrong source baseline, or long emoji text.
+// Tier: unit; injected HTTP/Git responses, no network or subprocesses.
+// Measured on 2026-11-16: the complete file ran in 0.12 s (Node test runner).
+test('normalizes pushed tags into versions accepted by packaging and artifact verification', () => {
+  assert.equal(validateVersion(releaseVersion('v1.2.3')), version);
+  assert.equal(releaseVersion(version), version);
+  for (const bad of ['v0.0.0', 'v1.2.3-beta', 'v01.2.3', 'v1.2.3\n', '$(id)', undefined]) {
+    assert.throws(() => releaseVersion(bad), /Version must/);
+  }
+});
+
+test('daily titles clean remote text, fit publication limits, and fall back on service errors', async () => {
+  assert.equal(await dailyTitle(version, { request: async () => Response.json({ hitokoto: '  星光\n不负\u202e赶路人。 ' }) }),
+    'v1.2.3 -- "星光不负赶路人。"');
+  const emoji = await dailyTitle(version, { request: async () => Response.json({ hitokoto: '🌟'.repeat(100) }) });
+  assert.ok(emoji.length <= 160);
+  assert.ok(emoji.isWellFormed());
+  for (const request of [async () => { throw new Error('timeout'); },
+    async () => new Response('<html>outage</html>'), async () => new Response('', { status: 503 }),
+    async () => Response.json({ hitokoto: '\r\n' })]) {
+    assert.equal(await dailyTitle(version, { request }), 'v1.2.3 -- "Stay hungry, stay foolish."');
+  }
+  const previousTitle = 'v1.2.3 -- "保持同一句。"';
+  assert.equal(await dailyTitle(version, { previousTitle, request: async () => { throw new Error('offline'); } }), previousTitle);
+});
+
+const metadataURL = 'https://github.com/MasterAlanLab/Kero-releases/releases/download/v1.2.2/release-metadata.json';
+const baseline = 'b'.repeat(40);
+
+function detailsOptions({ previous = baseline, log = '修复启动 (1234567)', metadata = {}, assetURL = metadataURL } = {}) {
+  return {
+    version, sha, token: 'synthetic-test-token',
+    runGit: args => {
+      if (args[0] === 'rev-parse') return sha;
+      if (args[0] === 'merge-base' && args[2] === previous && args[3] === sha) return '';
+      if (args[0] === 'log' && args.at(-1) === (previous ? `${previous}..${sha}` : sha)) return log;
+      throw new Error('Unexpected source range');
+    },
+    request: async (url, init) => {
+      if (url === 'https://v1.hitokoto.cn/') return Response.json({ hitokoto: '每日一句。' });
+      if (url === 'https://api.github.com/repos/MasterAlanLab/Kero-releases/releases/latest') {
+        assert.equal(init.headers.Authorization, 'Bearer synthetic-test-token');
+        return previous ? Response.json({ assets: [{ name: 'release-metadata.json', browser_download_url: assetURL }] })
+          : new Response('', { status: 404 });
+      }
+      if (url === metadataURL) {
+        assert.equal(init.headers, undefined); // Never send the token to the public asset/CDN.
+        return Response.json({ sourceRepository: 'MasterAlanLab/Kero', sourceCommit: previous, ...metadata });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    },
+  };
+}
+
+test('generates first-release history and subsequent source changes using the last public metadata', async () => {
+  for (const previous of [null, baseline]) {
+    const details = await prepareReleaseDetails('/unused', detailsOptions({ previous }));
+    assert.deepEqual(details, { version, sha, title: 'v1.2.3 -- "每日一句。"', notes: '## 更新内容\n\n- 修复启动 (1234567)' });
+  }
+  const empty = await prepareReleaseDetails('/unused', detailsOptions({ log: '' }));
+  assert.equal(empty.notes, '## 更新内容\n\n- 重新构建客户端安装包。');
+});
+
+test('bounds long changelogs without blocking automatic release or splitting Unicode characters', async () => {
+  const log = Array.from({ length: 101 }, (_, i) => `${i} ${'🌟'.repeat(150)}`).join('\n');
+  const details = await prepareReleaseDetails('/unused', detailsOptions({ log }));
+  assert.ok(details.notes.length <= 16000);
+  assert.ok(details.notes.isWellFormed());
+  assert.match(details.notes, /另有 1 条提交未展开/);
+});
+
+test('rejects untrusted source baselines and mismatched checkouts; explicit notes can reset the baseline', async () => {
+  for (const overrides of [{ metadata: { sourceCommit: 'not-a-sha' } },
+    { metadata: { sourceRepository: 'someone/else' } }, { assetURL: 'https://example.invalid/metadata.json' }]) {
+    await assert.rejects(prepareReleaseDetails('/unused', detailsOptions(overrides)), /Invalid (previous source commit|source metadata URL)/);
+  }
+  const opts = detailsOptions();
+  const originalGit = opts.runGit;
+  opts.runGit = args => {
+    if (args[0] === 'merge-base') throw new Error('not an ancestor');
+    return originalGit(args);
+  };
+  await assert.rejects(prepareReleaseDetails('/unused', opts), /not an ancestor/);
+  const explicit = await prepareReleaseDetails('/unused', { ...opts, notes: ' 手写说明。 ',
+    request: async url => {
+      assert.equal(url, 'https://v1.hitokoto.cn/');
+      return Response.json({ hitokoto: '每日一句。' });
+    } });
+  assert.equal(explicit.notes, '手写说明。');
+  await assert.rejects(prepareReleaseDetails('/unused', { ...opts, runGit: () => baseline }), /does not match build source/);
+  await assert.rejects(prepareReleaseDetails('/unused', { ...opts,
+    request: async () => new Response('', { status: 403 }) }), /HTTP 403/);
 });

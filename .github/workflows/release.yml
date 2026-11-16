@@ -1,7 +1,10 @@
 name: Release Kero
-run-name: Kero ${{ inputs.version }} from ${{ inputs.source_ref }}
+run-name: Kero ${{ inputs.version || github.ref_name }} from ${{ inputs.source_ref || 'main' }}
 
 on:
+  push:
+    tags:
+      - 'v[0-9]*'
   workflow_dispatch:
     inputs:
       version:
@@ -14,12 +17,12 @@ on:
         default: main
         type: string
       release_notes:
-        description: '本次更新说明（Markdown，发布前可在草稿中完善）'
-        required: true
+        description: '更新说明（可留空，自动从源码提交生成）'
+        required: false
         type: string
       draft:
-        description: '保存为草稿，安装验收后手动发布'
-        default: true
+        description: '仅保存草稿（默认构建成功后直接公开）'
+        default: false
         type: boolean
       prerelease:
         description: '标记为预发布（官网不作为正式版展示）'
@@ -34,8 +37,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  KERO_VERSION: ${{ inputs.version }}
-  KERO_SOURCE_REF: ${{ inputs.source_ref }}
+  KERO_VERSION: ${{ inputs.version || github.ref_name }}
+  KERO_SOURCE_REF: ${{ inputs.source_ref || 'main' }}
   KERO_NOTES: ${{ inputs.release_notes }}
   # Bake the Kero identity into the installed app, not just the CI process.
   KERO_PLATFORM_POOL: '1'
@@ -49,6 +52,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
     steps:
       - name: Checkout release tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -72,8 +76,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: MasterAlanLab/Kero
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ env.KERO_SOURCE_REF }}
           token: ${{ secrets.KERO_SOURCE_TOKEN }}
+          fetch-depth: 0
           persist-credentials: false
           path: source
 
@@ -81,6 +86,21 @@ jobs:
         id: source
         run: |
           echo "sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=${KERO_VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog and daily title
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KERO_SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: node scripts/release.mjs details source release-details.json
+
+      - name: Save release text for publication
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-details
+          path: release-details.json
+          if-no-files-found: error
+          retention-days: 7
 
   build:
     name: Build (${{ matrix.platform }})
@@ -105,6 +125,7 @@ jobs:
         shell: bash
     env:
       KERO_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      KERO_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout release tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,8 +197,8 @@ jobs:
       contents: write
     env:
       KERO_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-      KERO_DRAFT: ${{ inputs.draft }}
-      KERO_PRERELEASE: ${{ inputs.prerelease }}
+      KERO_DRAFT: ${{ inputs.draft || false }}
+      KERO_PRERELEASE: ${{ inputs.prerelease || false }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout release tools
@@ -197,5 +218,11 @@ jobs:
           merge-multiple: true
           path: staged
 
+      - name: Download generated release text
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-details
+          path: metadata
+
       - name: Verify all platforms and publish
-        run: node scripts/release.mjs publish staged dist
+        run: node scripts/release.mjs publish staged dist metadata/release-details.json
