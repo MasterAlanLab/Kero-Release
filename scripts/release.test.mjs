@@ -10,7 +10,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { assembleRelease, stageInstallers, validateVersion, lookupRelease } from './release.mjs';
+import { assembleRelease, stageInstallers, validateVersion, lookupRelease, planRelease } from './release.mjs';
 import { dailyTitle, prepareReleaseDetails, releaseVersion } from './release-details.mjs';
 
 const sha = 'a'.repeat(40);
@@ -75,6 +75,25 @@ test('finds pending draft tags for retry and blocks published versions and API f
   await assert.rejects(lookupRelease(version, { token, request: async () => new Response(JSON.stringify({
     errors: [{ message: 'not authorized' }], data: { repository: null },
   })) }), /Cannot inspect release repository/);
+});
+
+// Regression: a queued tag run followed a successful manual run for v1.0.0
+// and falsely looked like a failed release. Production preflight must skip the
+// public version while the publish gate must still reject overwrites. Existing
+// lookup tests only covered the strict publish gate. Tier: offline unit.
+// Measured 2026-11-17: the complete file ran in 0.13 s (Node test runner).
+test('preflight skips duplicate published versions while drafts and new versions still build', async () => {
+  let release = null;
+  const opts = { token: 'synthetic-test-token', request: async () => Response.json({ data: { repository: { release } } }) };
+  assert.deepEqual(await planRelease(version, opts), { shouldBuild: true, reason: 'new-release' });
+  release = { isDraft: true };
+  assert.deepEqual(await planRelease(version, opts), { shouldBuild: true, reason: 'resume-draft' });
+  release = { isDraft: false };
+  assert.deepEqual(await planRelease(version, opts), { shouldBuild: false, reason: 'already-published' });
+  await assert.rejects(lookupRelease(version, opts), /already public/);
+  release = {};
+  await assert.rejects(planRelease(version, opts), /Invalid release state/);
+  await assert.rejects(planRelease(version, { ...opts, request: async () => new Response('', { status: 403 }) }), /HTTP 403/);
 });
 
 test('assembles four renamed installers and reproducible checksums; excludes internal build data', t => {

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, copyFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { releaseVersion, prepareReleaseDetails } from './release-details.mjs';
@@ -115,7 +115,7 @@ export function assembleRelease(staged, out, { version, sha, notes, buildURL }) 
 
 // REST releases/tags only finds published tags. GraphQL also resolves a draft's
 // pending tag, so a failed upload can resume without creating a duplicate draft.
-export async function lookupRelease(version, { token, request = fetch }) {
+async function inspectRelease(version, { token, request = fetch }) {
   validateVersion(version);
   check(token, 'Missing GitHub Actions token');
   const response = await request('https://api.github.com/graphql', {
@@ -132,7 +132,20 @@ export async function lookupRelease(version, { token, request = fetch }) {
   check(!body.errors?.length && body.data?.repository, 'Cannot inspect release repository');
   const release = body.data.repository.release;
   if (release === null) return null;
-  check(release?.isDraft === true, 'This version is already public; publish a new version instead');
+  check(typeof release?.isDraft === 'boolean', 'Invalid release state');
+  return release;
+}
+
+// Preflight can skip a duplicate request; publishing still rejects public tags.
+export async function planRelease(version, options) {
+  const release = await inspectRelease(version, options);
+  return { shouldBuild: release?.isDraft !== false,
+    reason: !release ? 'new-release' : release.isDraft ? 'resume-draft' : 'already-published' };
+}
+
+export async function lookupRelease(version, options) {
+  const release = await inspectRelease(version, options);
+  check(release?.isDraft !== false, 'This version is already public; publish a new version instead');
   return release;
 }
 
@@ -149,10 +162,19 @@ async function main() {
   const [command, first, second, detailsFile] = process.argv.slice(2);
   const version = releaseVersion(process.env.KERO_VERSION);
   if (command === 'preflight') {
-    check(process.env.KERO_SOURCE_TOKEN, 'Configure KERO_SOURCE_TOKEN in repository Actions secrets');
+    check(process.env.GITHUB_REPOSITORY === repository, `Run this workflow in ${repository}`);
     check(process.env.KERO_SOURCE_REF?.trim() && !/[\r\n\0]/.test(process.env.KERO_SOURCE_REF), 'Invalid source ref');
     check((process.env.KERO_NOTES || '').length <= 16000, 'Release notes exceed 16000 characters');
-    await existingRelease(version);
+    const plan = await planRelease(version, { token: process.env.GH_TOKEN });
+    if (plan.shouldBuild) check(process.env.KERO_SOURCE_TOKEN, 'Configure KERO_SOURCE_TOKEN in repository Actions secrets');
+    if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT,
+      `version=${version}\nshould_build=${plan.shouldBuild}\n`);
+    const url = `https://github.com/${repository}/releases/tag/v${version}`;
+    const summary = plan.shouldBuild ? `Kero v${version}: ${plan.reason}. Resolve source and build all platforms.\n`
+      : `Kero v${version}: already published — skipped.\n\n` +
+        `[View the published release](${url}). This run did not build, upload or change assets.\n`;
+    console.log(summary);
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
     return;
   }
   const sha = process.env.KERO_SOURCE_SHA;

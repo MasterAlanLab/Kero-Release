@@ -1,5 +1,5 @@
 name: Release Kero
-run-name: Kero ${{ inputs.version || github.ref_name }} from ${{ inputs.source_ref || 'main' }}
+run-name: Kero ${{ inputs.version || github.ref_name }} · ${{ github.event_name == 'push' && 'tag' || 'manual' }} · ${{ inputs.source_ref || 'main' }}
 
 on:
   push:
@@ -52,7 +52,8 @@ jobs:
     timeout-minutes: 10
     outputs:
       source_sha: ${{ steps.source.outputs.sha }}
-      version: ${{ steps.source.outputs.version }}
+      version: ${{ steps.preflight.outputs.version }}
+      should_build: ${{ steps.preflight.outputs.should_build }}
     steps:
       - name: Checkout release tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,6 +66,7 @@ jobs:
           node-version: 22
 
       - name: Validate parameters and release state
+        id: preflight
         env:
           GH_TOKEN: ${{ github.token }}
           KERO_SOURCE_TOKEN: ${{ secrets.KERO_SOURCE_TOKEN }}
@@ -73,6 +75,7 @@ jobs:
           node --test scripts/release.test.mjs
 
       - name: Resolve source to one commit
+        if: steps.preflight.outputs.should_build == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: MasterAlanLab/Kero
@@ -83,18 +86,20 @@ jobs:
           path: source
 
       - name: Record source commit
+        if: steps.preflight.outputs.should_build == 'true'
         id: source
         run: |
           echo "sha=$(git -C source rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "version=${KERO_VERSION#v}" >> "$GITHUB_OUTPUT"
 
       - name: Generate changelog and daily title
+        if: steps.preflight.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           KERO_SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: node scripts/release.mjs details source release-details.json
 
       - name: Save release text for publication
+        if: steps.preflight.outputs.should_build == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-details
@@ -105,6 +110,7 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     needs: prepare
+    if: needs.prepare.outputs.should_build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -196,6 +202,7 @@ jobs:
   publish:
     name: Publish complete release
     needs: [prepare, build]
+    if: needs.prepare.outputs.should_build == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     permissions:
